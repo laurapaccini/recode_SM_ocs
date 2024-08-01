@@ -1,0 +1,481 @@
+#! /bin/ksh
+#-----------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
+#
+# Levante batch job parameters                                                  
+#-----------------------------------------------------------------------------  
+#SBATCH --account=mh0066                                                        
+#SBATCH --job-name=exp.test_nested.run                               
+#SBATCH --partition=compute                                            
+#SBATCH --nodes=128                                                                         
+#SBATCH --output=/work/mh0066/m300684/test_newgrids/logfiles/LOG.exp.SM_run.%j.o
+#SBATCH --error=/work/mh0066/m300684/test_newgrids/logfiles/LOG.exp.SM_run.%j.o
+#SBATCH --exclusive                                                             
+#SBATCH --time=05:00:00    
+
+#-----------------------------------------------------------------------------
+
+set -x
+
+##NEW##0922
+export SLURM_DIST_PLANESIZE=32
+######
+
+# OpenMP settings
+export OMP_NUM_THREADS=4 
+export ICON_THREADS=$OMP_NUM_THREADS 
+export OMP_SCHEDULE="guided" 
+export OMP_DYNAMIC="false"
+export OMP_STACKSIZE=1024M 
+
+
+#### NEW MODIFICATIONS #####
+export OMPI_MCA_pml="ucx"         # sets the point-to-point management
+export OMPI_MCA_btl="self"        # sets the matching transport layer (MPI-2 one-sided comm)
+export OMPI_MCA_osc="pt2pt"
+export UCX_IB_ADDR_TYPE=ib_global
+# for most runs one may or may not want to disable HCOLL
+export OMPI_MCA_coll="^ml,hcoll"
+#export OMPI_MCA_coll_hcoll_enable="0"
+#export HCOLL_ENABLE_MCAST_ALL="0"
+export HCOLL_MAIN_IB=mlx5_0:1
+export UCX_NET_DEVICES=mlx5_0:1
+export UCX_TLS=mm,knem,cma,dc_mlx5,dc_x,self
+export UCX_UNIFIED_MODE=y
+export HDF5_USE_FILE_LOCKING=FALSE
+export OMPI_MCA_io="romio321"
+#export UCX_HANDLE_ERRORS=bt
+export MALLOC_TRIM_THRESHOLD_="-1"
+export MKL_ENABLE_INSTRUCTIONS=AVX2
+export MKL_DEBUG_CPU_TYPE=5
+
+
+
+# MPI variables - Levante
+# ----------------------------
+
+#export I_MPI_PMI=pmi2
+#export I_MPI_PMI_LIBRARY=/usr/lib64/libpmi2.so
+####
+#mpi_root=/opt/mpi/bullxmpi_mlx/1.2.9.2
+no_of_nodes=${SLURM_JOB_NUM_NODES:=1}
+mpi_procs_pernode=$((${SLURM_JOB_CPUS_PER_NODE%%\(*} / 1/(2*OMP_NUM_THREADS)))
+((mpi_total_procs=no_of_nodes * mpi_procs_pernode))
+ulimit -s $((${OMP_STACKSIZE/M/ * 1024}))
+START="srun -l  --kill-on-bad-exit=1 --nodes=${SLURM_JOB_NUM_NODES:-1} --cpu_bind=verbose --distribution=plane --hint=nomultithread --ntasks=$((no_of_nodes*mpi_procs_pernode)) --ntasks-per-node=${mpi_procs_pernode} --cpus-per-task=$((1 * OMP_NUM_THREADS)) --propagate=STACK"
+
+# determine base
+basedir='/work/mh0066/m300684/icon-nwp/build-fixed_soil_moisture'
+
+# determine architecture
+arch=x86_64-unknown-linux-gnu
+
+#-----------------------------------------------------------------------------
+#
+# experiment identifier (replace III with your initials and EEEE by a four 
+# digit number for the current experiment and  TTTT  by some text).
+# EXP=IIIEEEETTTT (see as well above for the job names)
+#
+EXP="ICON_nested_"                # experiment identifier
+
+# absolute path to directory with job scripts:
+SCRIPTDIR=/work/mh0066/m300684/icon-nwp/build-fixed_soil_moisture/run
+
+# absolute path to directory with plenty of space:
+EXPDIR=/work/mh0066/m300684/test_newgrids/m2/output_fixedSM/  #_restart15UTC
+# absolute path to input directory
+INDIR=/work/mh0066/m300684/test_newgrids/ #/work/mh0731/from_Mistral/mh0731/m300684/nested_40to20km/
+
+# absolute path to external parameter directory
+
+EXTPARDIR=/work/mh0066/m300684/new_grids/ 
+
+
+# absolute path to model binary, including the executable
+MODEL=/work/mh0066/m300684/icon-nwp/build-fixed_soil_moisture/bin/icon
+# absolute path to files needed for radiation
+
+RADDIR=/work/mh0066/m300684/icon-nwp/data
+MAP_FILE=/work/mh0066/m300684/icon-nwp/build-fixed_soil_moisture/run/ana_varnames_map_file.txt 
+# --------------------------------------------------------------------
+## Define output on regular grid:
+# reg_lon_def=0.,0.25,359.75
+# reg_lat_def=-90.,0.25,90.
+# --------------------------------------------------------------------
+
+set +x
+
+# the directory for the experiment will be created, if not already there
+if [ ! -d $EXPDIR ]; then
+    mkdir -p $EXPDIR
+fi
+#
+cd $EXPDIR
+#
+
+# Grids and relative aliases
+grid_1=base_grid
+grid_2=domain1_DOM01
+grid_3=domain2_DOM02
+
+grid_1_alias=icon-grid_R2B7
+grid_2_alias=icon-grid_R2B8
+grid_3_alias=icon-grid_R2B9
+
+atmo_dyn_grids="${grid_1_alias}.nc ${grid_2_alias}.nc ${grid_3_alias}.nc"
+dynamics_parent_grid_id="     0 , 1, 2"
+#
+
+# Link the grid in the experiment directory
+ln -sf $INDIR/${grid_1}.nc ./${grid_1_alias}.nc
+ln -sf $INDIR/${grid_2}.nc ./${grid_2_alias}.nc
+ln -sf $INDIR/${grid_3}.nc ./${grid_3_alias}.nc
+
+# Link the extpar in the experiment directory
+ln -sf $EXTPARDIR/external_parameter_icon_${grid_1}_tiles.nc extpar_${grid_1_alias}.nc
+ln -sf $EXTPARDIR/external_parameter_icon_${grid_2}_tiles.nc extpar_${grid_2_alias}.nc
+ln -sf $EXTPARDIR/external_parameter_icon_${grid_3}_tiles.nc extpar_${grid_3_alias}.nc
+
+
+###
+# SST/SIC                                                                                                                                                
+sst_data_path=/work/mh0066/m300684/remap/SST_newgrids/
+ln -sf ${sst_data_path}/SST-SIC_2017_0301-0615_runmean_R2B7.nc  SST-SIC_${grid_1_alias}.nc
+ln -sf ${sst_data_path}/SST-SIC_2017_0301-0615_runmean_R2B8.nc  SST-SIC_${grid_2_alias}.nc 
+ln -sf ${sst_data_path}/SST-SIC_2017_0301-0615_runmean_R2B9.nc  SST-SIC_${grid_3_alias}.nc
+
+
+# Link initial and boundary conditions
+ln -sf $INDIR/m2/ifs_oper_T1279_2017030100_i3_base_grid.nc  ifs2icon_R2B07_DOM01.nc
+ln -sf $INDIR/m2/ifs_oper_T1279_2017030100_i3_dom01.nc ifs2icon_R2B08_DOM02.nc
+ln -sf $INDIR/m2/ifs_oper_T1279_2017030100_i3_dom02.nc ifs2icon_R2B09_DOM03.nc
+
+ln -sf ${RADDIR}/ECHAM6_CldOptProps.nc rrtm_cldopt.nc
+ln -sf ${RADDIR}/rrtmg_lw.nc .
+
+
+#-----------------------------------------------------------------------------
+# The following values must be set here as shell variables so that they can be used
+# also in the executing section of the completed run script
+#-----------------------------------------------------------------------------
+# the namelist filename
+atmo_namelist=NAMELIST_${EXP}
+
+# global timing
+start_date="2017-03-01T00:00:00Z"
+ndays_restart=10 
+dt_restart=`expr ${ndays_restart} \* 86400`
+
+# model timing
+nhours=744 #31 days  # number of forecast hours to run
+dtime=180
+nsteps=`expr ${nhours} \*  3600 / ${dtime}`
+ninc_mtgrm=30          # output interval 3600s
+
+# model parameters
+model_equations=3    # equation system
+#                     1=hydrost. atm. T
+#                     1=hydrost. atm. theta dp
+#                     3=non-hydrost. atm.,
+#                     0=shallow water model
+#                    -1=hydrost. ocean
+#----------------------------------------------------------------------------
+# create ICON master namelist
+# ------------------------
+# For a complete list see Namelist_overview and Namelist_overview.pdf
+
+cat > icon_master.namelist << EOF
+&master_nml
+ lrestart                     = .TRUE.
+/
+&time_nml
+ ini_datetime_string          = "$start_date"
+ dt_restart                   = $dt_restart
+/
+&master_model_nml
+  model_type                  = 1
+  model_name                  = "ATMO"
+  model_namelist_filename     = "$atmo_namelist"
+  model_min_rank              = 1
+  model_max_rank              = 65536
+  model_inc_rank              = 1
+/
+EOF
+
+#-----------------------------------------------------------------------------
+# ------------------------------
+# write ICON namelist parameters
+# ------------------------
+# For a complete list see Namelist_overview and Namelist_overview.pdf
+# ------------------------
+# reconstrcuct the grid parameters in namelist form
+dynamics_grid_filename=""
+for gridfile in ${atmo_dyn_grids}; do
+  dynamics_grid_filename="${dynamics_grid_filename} '${gridfile}',"
+done
+
+dynamics_parent_grid_id="${dynamics_parent_grid_id},"
+
+# ------------------------
+
+cat > ${atmo_namelist} << EOF
+&parallel_nml
+ nproma				= 16
+ num_io_procs			= 4
+/
+&grid_nml
+ dynamics_grid_filename		= ${dynamics_grid_filename}
+ dynamics_parent_grid_id      = ${dynamics_parent_grid_id}
+ lfeedback          = .false.    
+/
+&initicon_nml
+ init_mode                      = 2            
+ ana_varnames_map_file          = '/work/mh0066/m300684/icon-nwp/run/ana_varnames_map_file.txt'
+
+/
+&io_nml
+ itype_pres_msl                 = 5              ! New extrapolation method to circumvent Ninjo problem with surface inversions
+ itype_rh                       = 1              ! RH w.r.t. water
+ restart_write_mode             = "joint procs multifile"
+ lflux_avg                      = .FALSE.
+/
+&run_nml
+ num_lev			= 90
+ lvert_nest			= .FALSE.
+ nsteps				= ${nsteps}
+ dtime				= ${dtime}    ! timestep in seconds
+ ldynamics			= .TRUE.      ! dynamics
+ ltransport			= .TRUE.
+ ntracer			= 5
+ iforcing			= 3           ! NWP forcing
+ ltestcase			= .FALSE.     ! false: run with real data
+ msg_level			= 12          ! default: 5, much more: 20
+ ltimer				= .TRUE.
+ timers_level			= 10
+ activate_sync_timers		= .FALSE.
+ output				= "nml"
+/
+&nwp_phy_nml
+ inwp_gscp         = 2
+ inwp_convection   = 1, 0, 0
+ inwp_radiation    = 1 
+ inwp_cldcover     = 1
+ inwp_turb         = 1
+ inwp_satad        = 1
+ inwp_sso          = 1
+ inwp_gwd          = 0
+ inwp_surface      = 1
+ icapdcycl         = 3
+ latm_above_top    = .false.
+ efdt_min_raylfric = 7200.
+ itype_z0          = 2
+ icpl_aero_conv    = 1
+ icpl_aero_gscp    = 1
+ lrtm_filename     = 'rrtmg_lw.nc'
+ cldopt_filename   = 'rrtm_cldopt.nc'                                                                      
+ ldetrain_conv_prec = .true. 
+/
+&turbdiff_nml
+  tkhmin        = 0.75
+  tkmmin        = 0.75
+  tkmmin_strat  = 4
+  pat_len       = 750.
+  c_diff        = 0.2
+  rat_sea       = 7.0
+  ltkesso       = .true.
+  frcsmot       = 0.2   ! these 2 switches together apply vertical smoothing of the TKE source terms
+  imode_frcsmot = 2     ! in the tropics (only), which reduces the moist bias in the tropical lower troposphere
+ ! use horizontal shear production terms with 1/SQRT(Ri) scaling to prevent unwanted side effects:
+  itype_sher    = 3
+  ltkeshs       = .true.
+  a_hshr        = 2.0
+  alpha0        = 0.0123
+  alpha0_max    = 0.0335
+  icldm_turb    = 1
+/
+&lnd_nml
+  ntiles         = 3                                                                                                                
+  nlev_snow      = 3                                                                                                                
+  lmulti_snow    = .false. ! .true. (tests)
+  itype_heatcond = 3
+  idiag_snowfrac = 20                                                                                                               
+  lsnowtile      = .true.                                                                                                           
+  lseaice        = .true.                                                                                                           
+  llake          = .true.
+  lprog_albsi    = .true.                                                                                                               
+  itype_lndtbl   = 4
+  itype_root     = 2
+  itype_evsl     = 4
+  cwimax_ml      = 5.e-4
+  c_soil         = 1.25
+  c_soil_urb     = 0.5
+  sstice_mode    = 6
+  sst_td_filename              = "SST-SIC_<gridfile>"
+  ci_td_filename               = "SST-SIC_<gridfile>"
+/
+&radiation_nml
+  irad_o3     = 7
+  irad_aero   = 6
+  albedo_type = 2          ! Modis albedo
+  vmr_co2     = 390.e-06   ! values representative for 2012
+  vmr_ch4     = 1800.e-09
+  vmr_n2o     = 322.0e-09
+  vmr_o2      = 0.20946
+  vmr_cfc11   = 240.e-12
+  vmr_cfc12   = 532.e-12
+/
+&nonhydrostatic_nml
+  iadv_rhotheta   = 2
+  ivctype         = 2
+  itime_scheme    = 4
+  exner_expol     = 0.333
+  vwind_offctr    = 0.2
+  damp_height     = 44000.
+  rayleigh_coeff  = 1
+  lhdiff_rcf      = .true.
+  divdamp_order   = 24 ! 2 ass, 24 fc
+  divdamp_type    = 32  ! optional: 2 assimilation cycle, 32 forecast
+  divdamp_fac     = 0.004   ! 0.004 for R2B6; recommendation for R3B7: 0.003
+  divdamp_trans_start= 12500
+  divdamp_trans_end  = 17500
+  l_open_ubc      = .false.
+  igradp_method   = 3
+  l_zdiffu_t      = .true.
+  thslp_zdiffu    = 0.02
+  thhgtd_zdiffu   = 125.
+  htop_moist_proc = 22500.
+  hbot_qvsubstep  = 16000.
+/
+&sleve_nml
+ min_lay_thckn   = 20.
+ max_lay_thckn   = 400.   ! maximum layer thickness below htop_thcknlimit
+ htop_thcknlimit = 14000. ! this implies that the upcoming COSMO-EU nest will have 60 levels
+ top_height      = 75000.
+ stretch_fac     = 0.9
+ decay_scale_1   = 4000.
+ decay_scale_2   = 2500.
+ decay_exp       = 1.2
+ flat_height     = 16000.
+/
+&dynamics_nml
+ iequations			= 3
+ idiv_method			= 1
+ divavg_cntrwgt			= 0.50
+ lcoriolis			= .TRUE.
+/
+&transport_nml
+ ctracer_list = '12345'
+ ivadv_tracer = 3,3,3,3,3
+ itype_hlimit = 3,4,4,4,4
+ ihadv_tracer = 52,2,2,2,2
+/
+&diffusion_nml
+ hdiff_order      = 5
+ itype_vn_diffu   = 1
+ itype_t_diffu    = 2
+ hdiff_efdt_ratio = 24.     ! 24.0  for R2B6; recommendation for R3B7: 30.0
+ hdiff_smag_fac   = 0.025   ! 0.025 for R2B6; recommendation for R3B7: 0.02
+ lhdiff_vn        = .true.
+ lhdiff_temp      = .true.
+/
+&interpol_nml
+ nudge_zone_width               = 8
+ lsq_high_ord                   = 3
+ l_intp_c2l                     = .TRUE.
+ l_mono_c2l                     = .TRUE.
+ support_baryctr_intp           = .TRUE.
+/
+&gridref_nml
+ grf_intmethod_e        	= 6
+ grf_intmethod_ct        	= 2
+ grf_tracfbk       		= 2
+ denom_diffu_v		        = 150.
+/
+&extpar_nml
+ itopo                          = 1
+ n_iter_smooth_topo             = 1,1
+ heightdiff_threshold           = 3000.
+ hgtdiff_max_smooth_topo        = 750.
+! extpar_filename                = "/work/mh0731/m300684/nested_40to20km/extpar_Global_40km_DOM01.nc"
+/
+&nwp_tuning_nml
+ itune_albedo                   = 1
+ tune_gkwake                    = 1.8 
+! tune_gfrcrit                   = 0.4
+ tune_dust_abs                  = 1.
+/
+&output_nml
+! --------------------------------------------------------------------------- !
+!! ---  ICON-2D: output field test - native grid                           --- !
+! --------------------------------------------------------------------------- !
+ filetype                     =  4                        ! output format: 2=GRIB2, 4=NETCDFv2
+ dom                          = -1                        ! write all domains
+ output_time_unit             =  1                        ! 1: seconds
+ output_bounds                =  0., 360., 360.             ! start, end, increment
+ steps_per_file               =  1
+ mode                         =  1  ! 1: forecast mode (relative t-axis), 2: climate mode (absolute t-axis)
+ include_last                 = .TRUE.
+ output_filename              = 'ICON_nested_const'           ! file name base
+ ml_varlist                   = 'z_ifc','fr_land','gz0','topography_c','ndvi_max','ndviratio'
+ output_grid                  = .TRUE.
+ remap                        = 0                         ! 1: latlon,  0: native grid
+/
+&output_nml
+ filetype                     =  4                        ! output format: 2=GRIB2, 4=NETCDFv2
+ dom                          =  3                        ! write all domains
+ output_time_unit             =  1                        ! 1: seconds
+ output_bounds                =  0., 8640000., 3600.     ! start, end, increment
+ steps_per_file               =  24  !3
+ mode                         =  1  ! 1: forecast mode (relative t-axis), 2: climate mode (absolute t-axis)
+ include_last                 = .TRUE.
+ output_filename              = 'ICON_nested_2Dsfc'           ! file name base
+ ml_varlist                   = 'u_10m','v_10m','t_g','qv_2m','tqv_dia','tqc_dia', 'tqi_dia','clct','pres_msl','cape_ml','cin_ml','qv_s','umfl_s','vmfl_s','t_2m','td_2m','pres_sfc' ,'clch','clcl','clcm','dbz_cmax'
+ output_grid                  = .TRUE.        !changed from FALSE
+ remap                        = 0                         ! 1: latlon,  0: native grid
+/
+
+&output_nml
+ filetype                     =  4                        ! output format: 2=GRIB2, 4=NETCDFv2
+ dom                          =  3                        ! write all domains
+ output_time_unit             =  1                        ! 1: seconds
+ output_bounds                =  0., 8640000., 3600.     ! start, end, increment
+ steps_per_file               =  24  !3
+ mode                         =  1  ! 1: forecast mode (relative t-axis), 2: climate mode (absolute t-axis)
+ include_last                 = .TRUE.
+ output_filename              = 'ICON_nested_2Dland'           ! file name base
+ ml_varlist                   = 'w_so','runoff_s','runoff_g','w_i'
+ output_grid                  = .TRUE.        !changed from FALSE
+ remap                        = 0                         ! 1: latlon,  0: native grid
+/
+
+
+&output_nml   
+ filetype                     =  4                        ! output format: 2=GRIB2, 4=NETCDFv2                       
+ dom                          =  3                        ! write all domains                                         
+ output_time_unit             =  1                        ! 1: seconds                                                
+ output_bounds                =  0., 8640000., 3600.     ! start, end, increment                                       
+ steps_per_file               =  24                                                                                   
+ mode                         =  1  ! 1: forecast mode (relative t-axis), 2: climate mode (absolute t-axis)           
+ include_last                 = .TRUE.                                           !                                     
+ output_filename              = 'ICON_nested_accu'           ! file name base                                          
+ ml_varlist                   = 'tot_prec', 'acclhfl_s' , 'acclhfl_bs','accqhfl_s','accshfl_s' , 'accthb_t', 'accsob_t', 'accthb_s','accsobclr_s','accsob_s','accthbclr_s'        
+ output_grid                  = .TRUE.                                                                               
+ remap                        = 0                         ! 1: latlon,  0: native grid                                
+/                     
+
+
+EOF
+
+cp -p $MODEL ./icon.exe
+
+
+$START icon.exe
+
+
+
+#
+#-----------------------------------------------------------------------------
+#
+exit
+#
+#-----------------------------------------------------------------------------

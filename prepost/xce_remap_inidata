@@ -1,0 +1,299 @@
+#! /bin/bash
+#
+# Adapted version of xce_ifs2icon & xce_remap_inidata for Levante
+# 
+#-----------------------------------------------------------------------------
+#SBATCH --account=mh0066
+#SBATCH --job-name=exp.inidata.run
+#SBATCH --partition=compute
+#SBATCH --nodes=1
+#SBATCH --output=logfiles/LOG.exp.inidata_icontools_levante.run.%j.o
+#SBATCH --error=logfiles/LOG.exp.inidata_icontools_levante.run.%j.o
+#SBATCH --exclusive
+#SBATCH --mem=248G
+# #
+#SBATCH --time=00:30:00
+#=============================================================================
+set -x
+
+#---------------------------------------------------------------------------
+# disable core dumps
+
+#---------------------------------------------------------------------------                                                                                         
+# openmp environment variables                                                                                                                                       
+# ----------------------------                                                                                                                                       
+export OMP_NUM_THREADS=4
+export ICON_THREADS=$OMP_NUM_THREADS
+export OMP_SCHEDULE="guided"
+export OMP_DYNAMIC="false"
+export OMP_STACKSIZE=1024M
+
+#### NEW MODIFICATIONS #####                                                                                                                                        
+export OMPI_MCA_pml="ucx"         # sets the point-to-point management
+export OMPI_MCA_btl="self"        # sets the matching transport layer (MPI-2 one-sided comm)
+export OMPI_MCA_osc="pt2pt"
+export UCX_IB_ADDR_TYPE=ib_global
+# for most runs one may or may not want to disable HCOLL
+export OMPI_MCA_coll="^ml,hcoll"
+#export OMPI_MCA_coll_hcoll_enable="0"
+#export HCOLL_ENABLE_MCAST_ALL="0"
+export HCOLL_MAIN_IB=mlx5_0:1
+export UCX_NET_DEVICES=mlx5_0:1
+export UCX_TLS=mm,knem,cma,dc_mlx5,dc_x,self
+export UCX_UNIFIED_MODE=y
+export HDF5_USE_FILE_LOCKING=FALSE
+export OMPI_MCA_io="romio321"
+#export UCX_HANDLE_ERRORS=bt
+export MALLOC_TRIM_THRESHOLD_="-1"
+export MKL_ENABLE_INSTRUCTIONS=AVX2
+export MKL_DEBUG_CPU_TYPE=5
+
+
+
+#-----------------------------------------------------------------------------
+# MPI variables
+# ----------------------------
+no_of_nodes=${SLURM_JOB_NUM_NODES:=1}
+mpi_procs_pernode=$((${SLURM_JOB_CPUS_PER_NODE%%\(*} / 1/(2*OMP_NUM_THREADS)))
+((mpi_total_procs=no_of_nodes * mpi_procs_pernode))
+START="srun --kill-on-bad-exit=1 --nodes=${SLURM_JOB_NUM_NODES:-1} --ntasks-per-node=${mpi_procs_pernode}"
+
+# load modules
+module purge
+module load intel gcc 
+module list
+
+ulimit -s unlimited
+
+
+# SETTINGS: DIRECTORIES AND INPUT/OUTPUT FILE NAMES --------------------------
+
+# directory containing DWD icon tools binaries
+ICONTOOLS_DIR=/work/mh0066/m300684/dwd_icon_tools/icontools
+
+# file name of input grid
+INGRID=/work/mh0731/from_Mistral/mh0731/m300684/indata_members/ifs_oper_T1279_2017030100.grb
+
+# file name of limited-area (output) grid
+LOCALGRID=/work/mh0066/m300684/test_newgrids/base_grid.nc #domain1_DOM01.nc
+
+# directory containing data files which shall be mapped to limited-area grid
+DATADIR=/work/mh0731/from_Mistral/mh0731/m300684/indata_members/ 
+DATAFILELIST=$(find ${DATADIR}/ifs_oper_T1279_2017030100.grb)
+ 
+# output directory for extracted boundary data
+OUTDIR=/work/mh0066/m300684/remap/
+
+mkdir -p $OUTDIR
+#-----------------------------------------------------------------------------
+
+BINARY_ICONSUB=iconsub
+BINARY_REMAP=iconremap
+AUXGRID=auxgrid
+
+
+#-----------------------------------------------------------------------------
+# Remap inital data onto local (limited-area) grid
+#-----------------------------------------------------------------------------
+
+cd ${OUTDIR}
+
+
+set +x
+
+intp_method=3
+
+# If both SMI and W_SO are available, it is advisable to interpolate SMI rather than W_SO.
+# ICON will read whatever is available.
+for field in  T SST SKT STL1 STL2 STL3 STL4 CI LSM; do
+cat >> NAMELIST_ICONREMAP_FIELDS << EOF_2B
+!
+&input_field_nml
+ inputname      = "${field}"         
+ outputname     = "${field}"          
+ intp_method    = 3
+/
+EOF_2B
+done
+
+
+
+cat >> NAMELIST_ICONREMAP_FIELDS << EOF_2D
+&input_field_nml  ! u component                                                                                                                                                                                
+ inputname      = "u"                                                                                                                                                                                           
+ outputname     = "U"                                                                                                                                                                                          
+ code           = 131                                                                                                                                                                                           
+ intp_method = ${intp_method}                                                                                                                                                                                                                                                     
+/  
+&input_field_nml  ! v component                                                                                                                                                                                
+                                                                  
+ inputname      = "v"                                                                                                                                                                                           
+ outputname     = "V"                                                                                                                                                                                           
+ code           = 132                                                                                                                                                                                           
+ intp_method = ${intp_method}                                                                                                                                                                                   
+                                                                 
+/  
+&input_field_nml  ! geopotential
+ inputname      = "z"
+ outputname     = "GEOP_SFC" 
+ code           = 129
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! QV                                                                                                                                                                                 
+ inputname      = "q"                                                                                                                                                                                            
+ outputname     = "QV"                                                                                                                                                                                     
+ code           = 133                                                                                                                                                                                            
+ intp_method = ${intp_method}                                                                                                                                                                                   
+/   
+&input_field_nml  ! surface pressure
+ inputname      = "lnsp"
+ outputname     = "LNPS" 
+ code           = 152
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! surface roughness
+ inputname      = "SR"
+ outputname     = "Z0" 
+ code           = 173
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! vertical velocity
+ inputname      = "w" 
+ outputname     = "W"
+ code           = 135
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! snow albedo
+ inputname      = "ASN"
+ outputname     = "ALB_SNOW" 
+ code           = 32
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! geopotential
+ inputname      = "z"
+ outputname     = "GEOP_ML" 
+ code           = 129
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! snow temperature
+ inputname      = "TSN"
+ outputname     = "T_SNOW" 
+ code           = 238
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! water content of snow
+ inputname      = "SD"
+ outputname     = "W_SNOW" 
+ code           = 141
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! density of snow
+ inputname      = "RSN"
+ outputname     = "RHO_SNOW" 
+ code           = 33
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! water cont. of interception storage
+ inputname      = "SRC"
+ outputname     = "W_I" 
+ code           = 198 
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! soil moisture index layer 1
+ inputname      = "SWVL1"
+ outputname     = "SMIL1" 
+ code           = 80
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! soil moisture index layer 2
+ inputname      = "SWVL2"
+ outputname     = "SMIL2" 
+ code           = 81
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! soil moisture index layer 3
+ inputname      = "SWVL3"
+ outputname     = "SMIL3" 
+ code           = 82
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! soil moisture index layer 4
+ inputname      = "SWVL4"
+ outputname     = "SMIL4" 
+ code           = 83
+ intp_method = ${intp_method}     
+/
+&input_field_nml  ! cloud liquid water content                                                                                                                                         
+ inputname      = "CLWC"                                                                                                                                                               
+ outputname     = "QC"                                                                                                                                                                 
+ code           = 246                                                                                                                                                                  
+ intp_method = ${intp_method}                                                                                                                                                          
+/                                                                                                                                                                                      
+&input_field_nml  ! cloud ice content                                                                                                                                                  
+ inputname      = "CIWC"                                                                                                                                                               
+ outputname     = "QI"                                                                                                                                                                 
+ code           = 247                                                                                                                                                                  
+ intp_method = ${intp_method}                                                                                                                                                          
+/                                                                                                                                                                                      
+&input_field_nml  ! rain water content                                                                                                                                                 
+ inputname      = "CRWC"                                                                                                                                                               
+ outputname     = "QR"                                                                                                                                                                 
+ code           = 75                                                                                                                                                                   
+ intp_method = ${intp_method}                                                                                                                                                          
+/                                                                                                                                                                                      
+&input_field_nml  ! snow water content                                                                                                                                                 
+ inputname      = "CSWC"                                                                                                                                                               
+ outputname     = "QS"                                                                                                                                                                 
+ code           = 76                                                                                                                                                                   
+ intp_method = ${intp_method}                                                                                                                                                          
+/                               
+
+
+EOF_2D
+
+
+set -x
+cat NAMELIST_ICONREMAP_FIELDS
+
+#-----------------------------------------------------------------------------
+# loop over file list:
+
+echo ${DATAFILELIST}
+for datafilename in ${DATAFILELIST} ; do
+
+datafile="${datafilename##*/}"  # get filename without path
+outdatafile=${datafile%.*}      # get filename without suffix
+
+cat > NAMELIST_ICONREMAP << EOF_2E
+&remap_nml
+ in_grid_filename  = '${INGRID}'
+ in_filename       = '${DATADIR}/${datafile}'
+ in_type           = 1
+ out_grid_filename = '${LOCALGRID}'
+ out_filename      = '${OUTDIR}/${outdatafile}_i3_m3_base_grid.nc'
+ out_type          = 2
+ out_filetype      = 4
+ l_have3dbuffer    = .false.
+! ncstorage_file    = "ncstorage.tmp"
+/
+
+
+
+EOF_2E
+
+${START}  ${ICONTOOLS_DIR}/${BINARY_REMAP} \
+            --remap_nml NAMELIST_ICONREMAP                                  \
+            --input_field_nml NAMELIST_ICONREMAP_FIELDS -vvv 2>&1
+
+done
+
+#-----------------------------------------------------------------------------
+# clean-up
+
+rm -f ncstorage.tmp*
+rm -f nml.log  NAMELIST_SUB NAMELIST_ICONREMAP NAMELIST_ICONREMAP_FIELDS
+
+#-----------------------------------------------------------------------------
+exit
+#-----------------------------------------------------------------------------
+
